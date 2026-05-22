@@ -12,3 +12,6 @@ dist
 *.log
 CMakeLists.txt
 dask-worker-space
+
+.venv
+archive
