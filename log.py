@@ -13,10 +13,15 @@ class MeowLogger(object):
 
     def __header(self, pid):
         now = datetime.now()
-        frameInfo = getframeinfo(currentframe().f_back.f_back)
+        frame_info = getframeinfo(currentframe().f_back.f_back)
         if pid:
-            return "[\033[90m{}|\033[0m{}:{}|{}] ".format(now.strftime("%Y-%m-%dT%H:%M:%S.%f"), os.path.basename(frameInfo.filename), frameInfo.lineno, os.getpid())
-        return "[\033[90m{}|\033[0m{}:{}] ".format(now.strftime("%Y-%m-%dT%H:%M:%S.%f"), os.path.basename(frameInfo.filename), frameInfo.lineno)
+            return "[\033[90m{}|\033[0m{}:{}|{}] ".format(
+                now.strftime("%Y-%m-%dT%H:%M:%S.%f"),
+                os.path.basename(frame_info.filename),
+                frame_info.lineno, os.getpid())
+        return "[\033[90m{}|\033[0m{}:{}] ".format(
+            now.strftime("%Y-%m-%dT%H:%M:%S.%f"),
+            os.path.basename(frame_info.filename), frame_info.lineno)
 
     def setLogFile(self, filename):
         if self.logf is not None:
@@ -36,7 +41,7 @@ class MeowLogger(object):
         self.log(self.__header(pid) + line, muted)
 
     def grey(self, line, pid=False, muted=False):
-        self.log("{}\033[90m{}\033[0m".format(self.__header(pid), line), muted)
+        self.log("\033[90m{}\033[0m".format(line), muted)
 
     def red(self, line, pid=False, muted=False):
         self.log("{}\033[91m{}\033[0m".format(self.__header(pid), line), muted)

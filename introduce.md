@@ -20,27 +20,24 @@ $$
 
 ### 1. 预测评价（权重均分）
 
-以下是转换后的 Markdown 格式（使用 LaTeX 语法表示公式）：
 
----
-
-### 1. Mean Squared Error (MSE)
+#### 1. Mean Squared Error (MSE)
 $$
 \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (y_i' - y_i)^2
 $$
 
 ---
 
-### 2. Pearson Correlation
+#### 2. Pearson Correlation
 $$
 r = \frac{\sum_{i=1}^{N} \left( (y_i' - \bar{y}')(y_i - \bar{y}) \right)}{\sqrt{\sum_{i=1}^{N} (y_i' - \bar{y}')^2} \sqrt{\sum_{i=1}^{N} (y_i - \bar{y})^2}}
 $$
 
 ---
 
-### 3. R Squared
+#### 3. R Squared
 $$
-R^2 = 1 - \frac{\text{MSE}(\text{model})}{\text{MSE}(\text{baseline})} = 1 - \frac{\sum_{i=1}^{N} (y_i - y_i')^2}{\sum_{i=1}^{N} (\bar{y}_i - y_i')^2}
+R^2 = 1 - \frac{\text{MSE}(\text{model})}{\text{MSE}(\text{baseline})} = 1 - \frac{\sum_{i=1}^{N} (y_i - y_i')^2}{\sum_{i=1}^{N} (\bar{y}_i - y_i)^2}
 $$
 
 where $y_i'$ is the predicted value and $y_i$ is the ground truth for each observation $i$.
