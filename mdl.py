@@ -1,4 +1,6 @@
+import gc
 import math
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -204,7 +206,7 @@ class SparseAttentionRegressor(nn.Module):
                 for h in self.heads}
 
 class MeowModel:
-    def __init__(self):
+    def __init__(self, checkpoint_dir: str | None = None):
         self.cfg = MODEL_CONFIG
         self.tcfg = TRAINING_CONFIG
         self.pcfg = PREPROCESSING_CONFIG
@@ -220,6 +222,9 @@ class MeowModel:
         self.scaler = torch.amp.GradScaler("cuda") if self.device.type == "cuda" else None
         self.scheduler = None
         self._sym_to_id: dict[str, int] = {}
+        self.checkpoint_dir = checkpoint_dir
+        self.global_step = 0
+        self.best_val_metric = -float("inf")
 
     def _preprocess_x(self, batch_x: np.ndarray) -> np.ndarray:
         batch_x = np.clip(batch_x, self.pcfg.feat_p01, self.pcfg.feat_p99)
@@ -284,52 +289,19 @@ class MeowModel:
             torch.from_numpy(sym_ids).to(self.device),
         )
 
-    def fit_preprocessing(self, xdf, ydf):
-        primary_y = ydf["fret12"].to_numpy().ravel()
-        all_y = self._clean(primary_y)
-        all_x = self._clean(xdf.to_numpy())
+    def fit_preprocessing(self, fit_chunks):
+        """Compute preprocessing statistics incrementally from chunks.
 
-        self.pcfg.vol20_idx = list(xdf.columns).index("vol20")
-        vol20_vals = np.abs(all_x[:, self.pcfg.vol20_idx])
-        self.pcfg.vol20_floor = max(float(np.percentile(vol20_vals, 5)), 1e-8)
-        vol20_safe = np.clip(vol20_vals, self.pcfg.vol20_floor, None) + 1e-8
-        self.pcfg.y_std = 1.0
+        Args:
+            fit_chunks: List of (xdf, ydf) tuples. Each is processed one at a time
+                        to keep memory bounded at O(1 day), avoiding OOM.
+        """
+        if not fit_chunks:
+            raise ValueError("fit_chunks must not be empty")
 
-        vol_normed_std = float(np.std(all_y / vol20_safe))
-        log.inf("vol20 index: {} | p05 floor: {:.6f} | "
-                "std(return/vol20_clipped) = {:.4f}".format(
-                    self.pcfg.vol20_idx, self.pcfg.vol20_floor, vol_normed_std))
-
-        self.pcfg.feat_p01 = np.percentile(all_x, 1, axis=0).astype(np.float32)
-        self.pcfg.feat_p99 = np.percentile(all_x, 99, axis=0).astype(np.float32)
-
-        clipped = np.clip(all_x, self.pcfg.feat_p01, self.pcfg.feat_p99)
-        feat_min = clipped.min(axis=0)
-        mu = clipped.mean(axis=0)
-        sigma = clipped.std(axis=0) + 1e-8
-        skew = ((clipped - mu) ** 3).mean(axis=0) / (sigma ** 3)
-        self.pcfg.feat_log_mask = (feat_min >= 0) & (skew > 1.5)
-
-        if self.pcfg.feat_log_mask.any():
-            clipped[:, self.pcfg.feat_log_mask] = np.log1p(
-                clipped[:, self.pcfg.feat_log_mask])
-
-        self.pcfg.feat_mean = clipped.mean(axis=0, keepdims=True).astype(np.float32)
-        raw_std = clipped.std(axis=0)
-        std_floor = max(float(np.median(raw_std)) * 0.01, 1e-4)
-        self.pcfg.feat_std = np.maximum(raw_std, std_floor).astype(np.float32)
-
-        feat_names = list(xdf.columns)
-        log.inf("Preprocessing fitted on {} rows | "
-                "clip range: [{:.4f}, {:.4f}] → [{:.4f}, {:.4f}] | "
-                "log1p features: {} | input_scale: {}".format(
-                    len(all_y),
-                    self.pcfg.feat_p01.min(), self.pcfg.feat_p01.max(),
-                    self.pcfg.feat_p99.min(), self.pcfg.feat_p99.max(),
-                    [feat_names[i] for i, m in enumerate(self.pcfg.feat_log_mask) if m],
-                    self.cfg.input_scale))
-
-        actual_nf = xdf.shape[1]
+        # Verify feature count against config
+        first_xdf, first_ydf = fit_chunks[0]
+        actual_nf = first_xdf.shape[1]
         if actual_nf != self.cfg.n_features:
             raise RuntimeError(
                 "Feature count mismatch: data has {} features but model "
@@ -337,7 +309,116 @@ class MeowModel:
                 "MeowFeatureGenerator.feature_names().".format(
                     actual_nf, self.cfg.n_features))
 
-        del all_x, clipped, vol20_vals, vol20_safe
+        feat_names = list(first_xdf.columns)
+        self.pcfg.vol20_idx = feat_names.index("vol20")
+        n_features = actual_nf
+
+        # ── Pass 1: collect samples for percentiles + track per-feature min ──
+        sample_rows = []       # every Nth row for percentile estimation
+        sample_vol20 = []      # vol20 samples for vol20_floor
+        feat_min = np.full(n_features, np.inf, dtype=np.float64)
+        n_total = 0
+        sample_every = 5       # sample 1 out of every N rows
+
+        log.inf("Preprocessing pass 1/2: streaming {} chunks for percentiles..."
+                .format(len(fit_chunks)))
+
+        for xdf, ydf in fit_chunks:
+            x_arr = self._clean(xdf.to_numpy())
+            n_total += x_arr.shape[0]
+
+            # Track min per feature
+            feat_min = np.minimum(feat_min, x_arr.min(axis=0))
+
+            # Sample rows for percentile estimation
+            sample_idx = slice(0, x_arr.shape[0], sample_every)
+            sample_rows.append(x_arr[sample_idx])
+            sample_vol20.append(np.abs(x_arr[sample_idx, self.pcfg.vol20_idx]))
+
+            del x_arr; gc.collect()
+
+        # ── Compute percentiles from samples ──
+        sample_all = np.concatenate(sample_rows, axis=0)
+        sample_vol20 = np.concatenate(sample_vol20)
+        del sample_rows; gc.collect()
+
+        log.inf("  Sampled {} rows from {} total for percentile estimation"
+                .format(sample_all.shape[0], n_total))
+
+        self.pcfg.vol20_floor = max(
+            float(np.percentile(sample_vol20, 5)), 1e-8)
+        del sample_vol20
+
+        self.pcfg.y_std = 1.0
+        self.pcfg.feat_p01 = np.percentile(
+            sample_all, 1, axis=0).astype(np.float32)
+        self.pcfg.feat_p99 = np.percentile(
+            sample_all, 99, axis=0).astype(np.float32)
+
+        # Compute skewness from sample to determine log_mask
+        clipped_sample = np.clip(
+            sample_all, self.pcfg.feat_p01, self.pcfg.feat_p99)
+        mu_sample = clipped_sample.mean(axis=0)
+        sigma_sample = clipped_sample.std(axis=0) + 1e-8
+        skew_sample = ((clipped_sample - mu_sample) ** 3).mean(axis=0) / (sigma_sample ** 3)
+        self.pcfg.feat_log_mask = (feat_min >= 0) & (skew_sample > 1.5)
+
+        del sample_all, clipped_sample, mu_sample, sigma_sample, skew_sample
+        gc.collect()
+
+        # ── Pass 2: clip, log1p, compute running mean & variance (Welford) ──
+        log.inf("Preprocessing pass 2/2: streaming for mean/std after clipping...")
+        n = 0
+        mean = np.zeros(n_features, dtype=np.float64)
+        M2 = np.zeros(n_features, dtype=np.float64)
+
+        for xdf, ydf in fit_chunks:
+            x_arr = self._clean(xdf.to_numpy())
+
+            # Clip
+            x_arr = np.clip(x_arr, self.pcfg.feat_p01, self.pcfg.feat_p99)
+
+            # log1p for skewed non-negative features
+            if self.pcfg.feat_log_mask.any():
+                x_arr[:, self.pcfg.feat_log_mask] = np.log1p(
+                    x_arr[:, self.pcfg.feat_log_mask])
+
+            # Welford's online algorithm for mean & variance
+            for row in x_arr:
+                n += 1
+                delta = row - mean
+                mean += delta / n
+                delta2 = row - mean
+                M2 += delta * delta2
+
+            del x_arr; gc.collect()
+
+        self.pcfg.feat_mean = mean.reshape(1, -1).astype(np.float32)
+        raw_std = np.sqrt(M2 / max(n - 1, 1))
+        std_floor = max(float(np.median(raw_std)) * 0.01, 1e-4)
+        self.pcfg.feat_std = np.maximum(raw_std, std_floor).astype(np.float32)
+
+        # ── Compute vol20-related stats ──
+        # Re-process first chunk for vol_normed_std (only need one day for this)
+        first_x, first_y = fit_chunks[0]
+        first_x_arr = self._clean(first_x.to_numpy())
+        first_y_arr = self._clean(first_y["fret12"].to_numpy().ravel())
+        vol20_vals = np.abs(first_x_arr[:, self.pcfg.vol20_idx])
+        vol20_safe = np.clip(vol20_vals, self.pcfg.vol20_floor, None) + 1e-8
+        vol_normed_std = float(np.std(first_y_arr / vol20_safe))
+        del first_x_arr, first_y_arr, vol20_vals, vol20_safe
+
+        log.inf("Preprocessing fitted on {} rows | "
+                "clip range: [{:.4f}, {:.4f}] → [{:.4f}, {:.4f}] | "
+                "log1p features: {} | input_scale: {}".format(
+                    n_total,
+                    self.pcfg.feat_p01.min(), self.pcfg.feat_p01.max(),
+                    self.pcfg.feat_p99.min(), self.pcfg.feat_p99.max(),
+                    [feat_names[i] for i, m in enumerate(self.pcfg.feat_log_mask) if m],
+                    self.cfg.input_scale))
+        log.inf("vol20 index: {} | p05 floor: {:.6f} | "
+                "std(return/vol20_clipped) = {:.4f}".format(
+                    self.pcfg.vol20_idx, self.pcfg.vol20_floor, vol_normed_std))
 
     def partial_fit(self, xdf, ydf):
         if self.pcfg.y_std is None:
@@ -355,7 +436,10 @@ class MeowModel:
             for h in horizons:
                 ydf[h] = ydf[h].to_numpy().ravel() / vol20_arr
 
+        train_loss = 0.0
+        n_batches = 0
         for start in range(0, len(syms), self.tcfg.batch_size):
+            n_batches += 1
             batch_syms = syms[start:start + self.tcfg.batch_size]
             x, y, mask, sym_ids = self._prepare_batch(xdf, ydf, batch_syms)
             y = y / self.pcfg.y_std
@@ -394,12 +478,14 @@ class MeowModel:
                     self.model.parameters(), self.tcfg.grad_clip)
                 self.optimizer.step()
 
+            train_loss += float(loss.detach().cpu().item())
             del x, y, mask, sym_ids, preds, valid, loss
 
         if self.scheduler is not None:
             self.scheduler.step()
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+        return train_loss / max(n_batches, 1)
 
     def set_scheduler(self, steps_per_epoch: int, n_epochs: int):
         t_max = steps_per_epoch * n_epochs
@@ -415,6 +501,45 @@ class MeowModel:
             milestones=[warmup_steps])
         log.inf("LR scheduler: warmup {} steps + CosineAnnealing, "
                 "T_max={}".format(warmup_steps, t_max))
+
+    def save_checkpoint(self, path: str | None = None):
+        """Save model, optimizer, scheduler, and preprocessing state."""
+        if path is None:
+            if self.checkpoint_dir is None:
+                log.yellow("No checkpoint_dir set, skipping save")
+                return
+            path = os.path.join(self.checkpoint_dir, "checkpoint_latest.pt")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        state = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler else None,
+            "sym_to_id": self._sym_to_id,
+            "global_step": self.global_step,
+            "best_val_metric": self.best_val_metric,
+            "pcfg": {k: v for k, v in vars(self.pcfg).items()
+                     if not k.startswith("_")},
+        }
+        torch.save(state, path)
+        log.inf("Checkpoint saved to {}".format(path))
+
+    def load_checkpoint(self, path: str):
+        """Load model, optimizer, scheduler, and preprocessing state."""
+        if not os.path.exists(path):
+            raise FileNotFoundError("Checkpoint not found: {}".format(path))
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(state["model_state_dict"])
+        self.optimizer.load_state_dict(state["optimizer_state_dict"])
+        if self.scheduler is not None and state.get("scheduler_state_dict"):
+            self.scheduler.load_state_dict(state["scheduler_state_dict"])
+        self._sym_to_id = state.get("sym_to_id", {})
+        self.global_step = state.get("global_step", 0)
+        self.best_val_metric = state.get("best_val_metric", -float("inf"))
+        for k, v in state.get("pcfg", {}).items():
+            if hasattr(self.pcfg, k):
+                setattr(self.pcfg, k, v)
+        log.inf("Checkpoint loaded from {} (global_step={})".format(
+            path, self.global_step))
 
     def predict(self, xdf, denormalize=True, horizon="fret12"):
         self.model.eval()

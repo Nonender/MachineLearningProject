@@ -4,6 +4,7 @@ diff
 diff.txt
 arxiv.sh
 __pycache__
+tests/__pycache__
 *.pyc
 *.bak
 release
@@ -16,3 +17,6 @@ dask-worker-space
 .venv
 archive
 report
+plots
+checkpoints
+runs

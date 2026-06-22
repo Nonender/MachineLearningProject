@@ -25,7 +25,7 @@ class TrainingConfig:
     weight_decay: float = 0.5
     grad_clip: float = 1.0
     batch_size: int = 256
-    n_epochs: int = 12
+    n_epochs: int = 1
     warmup_ratio: float = 0.1
     lr_scheduler_eta_min: float = 1e-5
 
