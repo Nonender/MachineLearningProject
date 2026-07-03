@@ -4,6 +4,8 @@
 
 ## 快速开始
 
+[数据集下载](https://www.kaggle.com/datasets/8f59f523259ba61071b5c2d97c7752db7b6f9b7771cf97d04bc79a32ed06ec98)
+
 ```bash
 # 1. 环境
 python3 -m venv .venv && source .venv/bin/activate
