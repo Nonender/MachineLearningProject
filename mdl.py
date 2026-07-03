@@ -310,7 +310,11 @@ class MeowModel:
                     actual_nf, self.cfg.n_features))
 
         feat_names = list(first_xdf.columns)
-        self.pcfg.vol20_idx = feat_names.index("vol20")
+        if "vol20" in feat_names:
+            self.pcfg.vol20_idx = feat_names.index("vol20")
+        else:
+            self.pcfg.vol20_idx = None
+            log.yellow("vol20 not found in features — label normalization disabled")
         n_features = actual_nf
 
         # ── Pass 1: collect samples for percentiles + track per-feature min ──
@@ -333,20 +337,25 @@ class MeowModel:
             # Sample rows for percentile estimation
             sample_idx = slice(0, x_arr.shape[0], sample_every)
             sample_rows.append(x_arr[sample_idx])
-            sample_vol20.append(np.abs(x_arr[sample_idx, self.pcfg.vol20_idx]))
+            if self.pcfg.vol20_idx is not None:
+                sample_vol20.append(np.abs(x_arr[sample_idx, self.pcfg.vol20_idx]))
 
             del x_arr; gc.collect()
 
         # ── Compute percentiles from samples ──
         sample_all = np.concatenate(sample_rows, axis=0)
-        sample_vol20 = np.concatenate(sample_vol20)
+        if sample_vol20:
+            sample_vol20 = np.concatenate(sample_vol20)
         del sample_rows; gc.collect()
 
         log.inf("  Sampled {} rows from {} total for percentile estimation"
                 .format(sample_all.shape[0], n_total))
 
-        self.pcfg.vol20_floor = max(
-            float(np.percentile(sample_vol20, 5)), 1e-8)
+        if self.pcfg.vol20_idx is not None and len(sample_vol20) > 0:
+            self.pcfg.vol20_floor = max(
+                float(np.percentile(sample_vol20, 5)), 1e-8)
+        else:
+            self.pcfg.vol20_floor = 1e-8
         del sample_vol20
 
         self.pcfg.y_std = 1.0
@@ -398,15 +407,16 @@ class MeowModel:
         std_floor = max(float(np.median(raw_std)) * 0.01, 1e-4)
         self.pcfg.feat_std = np.maximum(raw_std, std_floor).astype(np.float32)
 
-        # ── Compute vol20-related stats ──
-        # Re-process first chunk for vol_normed_std (only need one day for this)
-        first_x, first_y = fit_chunks[0]
-        first_x_arr = self._clean(first_x.to_numpy())
-        first_y_arr = self._clean(first_y["fret12"].to_numpy().ravel())
-        vol20_vals = np.abs(first_x_arr[:, self.pcfg.vol20_idx])
-        vol20_safe = np.clip(vol20_vals, self.pcfg.vol20_floor, None) + 1e-8
-        vol_normed_std = float(np.std(first_y_arr / vol20_safe))
-        del first_x_arr, first_y_arr, vol20_vals, vol20_safe
+        # ── Compute vol20-related stats (if vol20 is present) ──
+        vol_normed_std = float("nan")
+        if self.pcfg.vol20_idx is not None:
+            first_x, first_y = fit_chunks[0]
+            first_x_arr = self._clean(first_x.to_numpy())
+            first_y_arr = self._clean(first_y["fret12"].to_numpy().ravel())
+            vol20_vals = np.abs(first_x_arr[:, self.pcfg.vol20_idx])
+            vol20_safe = np.clip(vol20_vals, self.pcfg.vol20_floor, None) + 1e-8
+            vol_normed_std = float(np.std(first_y_arr / vol20_safe))
+            del first_x_arr, first_y_arr, vol20_vals, vol20_safe
 
         log.inf("Preprocessing fitted on {} rows | "
                 "clip range: [{:.4f}, {:.4f}] → [{:.4f}, {:.4f}] | "
@@ -416,9 +426,13 @@ class MeowModel:
                     self.pcfg.feat_p99.min(), self.pcfg.feat_p99.max(),
                     [feat_names[i] for i, m in enumerate(self.pcfg.feat_log_mask) if m],
                     self.cfg.input_scale))
-        log.inf("vol20 index: {} | p05 floor: {:.6f} | "
-                "std(return/vol20_clipped) = {:.4f}".format(
-                    self.pcfg.vol20_idx, self.pcfg.vol20_floor, vol_normed_std))
+        if self.pcfg.vol20_idx is not None:
+            log.inf("vol20 index: {} | p05 floor: {:.6f} | "
+                    "std(return/vol20_clipped) = {:.4f}".format(
+                        self.pcfg.vol20_idx, self.pcfg.vol20_floor,
+                        vol_normed_std))
+        else:
+            log.inf("vol20 not available — label normalization skipped")
 
     def partial_fit(self, xdf, ydf):
         if self.pcfg.y_std is None:

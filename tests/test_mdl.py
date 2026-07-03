@@ -69,15 +69,16 @@ def test_variable_length():
 
 def test_checkpoint_roundtrip():
     with tempfile.TemporaryDirectory() as tmpdir:
-        PREPROCESSING_CONFIG.feat_mean = np.zeros((1, 94), dtype=np.float32)
-        PREPROCESSING_CONFIG.feat_std = np.ones((1, 94), dtype=np.float32)
-        PREPROCESSING_CONFIG.feat_p01 = np.full((94,), -1e6, dtype=np.float32)
-        PREPROCESSING_CONFIG.feat_p99 = np.full((94,), 1e6, dtype=np.float32)
-        PREPROCESSING_CONFIG.feat_log_mask = np.zeros(94, dtype=bool)
+        nf = MODEL_CONFIG.n_features
+        PREPROCESSING_CONFIG.feat_mean = np.zeros((1, nf), dtype=np.float32)
+        PREPROCESSING_CONFIG.feat_std = np.ones((1, nf), dtype=np.float32)
+        PREPROCESSING_CONFIG.feat_p01 = np.full((nf,), -1e6, dtype=np.float32)
+        PREPROCESSING_CONFIG.feat_p99 = np.full((nf,), 1e6, dtype=np.float32)
+        PREPROCESSING_CONFIG.feat_log_mask = np.zeros(nf, dtype=bool)
         PREPROCESSING_CONFIG.y_std = 1.0
 
         model1 = MeowModel()
-        x = torch.randn(2, 16, 94).to(model1.device)
+        x = torch.randn(2, 16, MODEL_CONFIG.n_features).to(model1.device)
         stock_ids = torch.tensor([0, 1]).to(model1.device)
         model1.model.eval()
         with torch.no_grad():

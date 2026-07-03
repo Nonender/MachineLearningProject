@@ -35,6 +35,22 @@ def make_mock_raw(n_symbols=3, n_ticks=40):
                 "asize0_4": np.random.randint(500, 20000),
                 "bsize5_9": np.random.randint(200, 10000),
                 "asize5_9": np.random.randint(200, 10000),
+                "bsize10_19": np.random.randint(100, 5000),
+                "asize10_19": np.random.randint(100, 5000),
+                "bid9": mid - spread * 2,
+                "ask9": mid + spread * 2,
+                "bid19": mid - spread * 3,
+                "ask19": mid + spread * 3,
+                "btr0_4": np.random.uniform(0, 200000),
+                "atr0_4": np.random.uniform(0, 200000),
+                "btr5_9": np.random.uniform(0, 100000),
+                "atr5_9": np.random.uniform(0, 100000),
+                "btr10_19": np.random.uniform(0, 50000),
+                "atr10_19": np.random.uniform(0, 50000),
+                "open": mid + np.random.normal(0, 0.005),
+                "high": mid + abs(np.random.normal(0, 0.01)),
+                "low": mid - abs(np.random.normal(0, 0.01)),
+                "lastpx": mid + np.random.normal(0, 0.003),
                 "tradeBuyQty": np.random.randint(0, 2000),
                 "tradeSellQty": np.random.randint(0, 2000),
                 "tradeBuyTurnover": np.random.uniform(0, 50000),
@@ -50,14 +66,17 @@ def make_mock_raw(n_symbols=3, n_ticks=40):
 
 def test_feature_count():
     gen = MeowFeatureGenerator(cache_dir=None)
-    assert len(gen.feature_names()) == 94
+    from parameters import MODEL_CONFIG
+    assert len(gen.feature_names()) == MODEL_CONFIG.n_features
 
 
 def test_gen_features_shape():
     gen = MeowFeatureGenerator(cache_dir=None)
     df = make_mock_raw(n_symbols=3, n_ticks=40)
     xdf, ydf = gen.gen_features(df)
-    assert xdf.shape[1] == 94, f"Expected 94 features, got {xdf.shape[1]}"
+    from parameters import MODEL_CONFIG
+    assert xdf.shape[1] == MODEL_CONFIG.n_features, \
+        f"Expected {MODEL_CONFIG.n_features} features, got {xdf.shape[1]}"
     assert list(ydf.columns) == gen.target_horizons
     syms = xdf.index.get_level_values("symbol").unique()
     assert len(syms) == 3

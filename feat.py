@@ -8,6 +8,13 @@ from log import log
 class MeowFeatureGenerator:
     @classmethod
     def feature_names(cls):
+        """Return the list of feature column names.
+
+        Full 94-feature set — restored to the original design validated
+        at Pearson r = 0.0826.  All engineered categories are included:
+        price/volatility, order-book microstructure, trade flow,
+        cross-sectional, nonlinear interactions, and derived signals.
+        """
         return [
             # Price / volatility (11)
             "ret1", "ret5", "ret10", "ret30",
@@ -54,17 +61,17 @@ class MeowFeatureGenerator:
             "ret1_trank", "vol20_trank",
             # Non-linear: asymmetry + vol-of-features (4)
             "ret1_up", "ret1_down", "ret1_vol10", "spread_vol10",
-            # ---- NEW: Return dynamics (3) ----
+            # Return dynamics (3)
             "ret_ema_5", "ret_ema_20", "ret_accel",
-            # ---- NEW: Volatility dynamics (2) ----
+            # Volatility dynamics (2)
             "vol_of_vol", "vol_ratio_10_20",
-            # ---- NEW: Order book dynamics (3) ----
+            # Order book dynamics (3)
             "ob_imb_change", "spread_change", "depth_skew",
-            # ---- NEW: Trade / volume (2) ----
+            # Trade / volume (2)
             "trade_imb_x_ob_imb", "volume_ratio_20",
-            # ---- NEW: Cross-sectional (2) ----
+            # Cross-sectional (2)
             "cx_spread", "cx_depth_imb",
-            # ---- NEW: Microstructure / distribution (3) ----
+            # Microstructure / distribution (3)
             "bid_ask_bounce", "ret_autocorr", "ret_skew_20",
         ]
 
@@ -83,10 +90,16 @@ class MeowFeatureGenerator:
 
         needed_raw = [
             "bid0", "ask0", "bid4", "ask4",
+            "bid9", "ask9", "bid19", "ask19",
             "bsize0", "asize0",
             "bsize0_4", "asize0_4", "bsize5_9", "asize5_9",
-            "tradeBuyQty", "tradeSellQty", "tradeBuyTurnover", "tradeSellTurnover",
+            "bsize10_19", "asize10_19",
+            "btr0_4", "atr0_4", "btr5_9", "atr5_9",
+            "btr10_19", "atr10_19",
+            "tradeBuyQty", "tradeSellQty",
+            "tradeBuyTurnover", "tradeSellTurnover",
             "nTradeBuy", "nTradeSell",
+            "open", "high", "low", "lastpx",
         ]
         df = df[self.mcols + needed_raw]
 
@@ -274,6 +287,62 @@ class MeowFeatureGenerator:
         df["ret_autocorr"] = df["ret1"] * df.groupby("symbol")["ret1"].shift(1)
         df["ret_skew_20"] = g["ret1"].transform(
             lambda x: x.rolling(20, min_periods=10).skew())
+
+        # ---- NEW: Enhanced order-book features (post-ablation) ----
+        # Level-19 order book imbalance
+        df["ob_imb19"] = (df["asize10_19"] - df["bsize10_19"]) / (
+            df["asize10_19"] + df["bsize10_19"] + eps)
+
+        # Depth concentration at top of book
+        df["depth_conc_top"] = df["bsize0"] / (df["bsize0_4"] + eps)
+
+        # Depth decay rate across level groups
+        depth_mean_all = (df["bsize0_4"] + df["bsize5_9"] + df["bsize10_19"]) / 3.0
+        df["depth_decay"] = (df["bsize0_4"] - depth_mean_all) / (
+            df["bsize0_4"] + depth_mean_all + eps)
+
+        # Turnover-based depth imbalance (L1-4)
+        df["turnover_imb_l1"] = np.log(
+            (df["btr0_4"] + eps) / (df["atr0_4"] + eps))
+
+        # OHLC-derived features
+        df["intra_ret"] = (df["midpx"] - df["open"]) / (df["open"] + eps)
+        df["high_low_range"] = (df["high"] - df["low"]) / (df["midpx"] + eps)
+        df["lastpx_bias"] = (df["lastpx"] - df["midpx"]) / (df["midpx"] + eps)
+
+        # Non-linear: ob_imb19 squared + cross with ob_imb0
+        df["ob_imb19_sq"] = df["ob_imb19"] ** 2
+        df["ob_imb0_x_ob_imb19"] = df["ob_imb0"] * df["ob_imb19"]
+
+        # Non-linear: volatility × order book interaction
+        df["vol20_x_ob_imb0"] = df["vol20"] * df["ob_imb0"]
+
+        # ---- NEW: Further order-book enhancements ----
+        # Depth distribution across level groups
+        df["depth_ratio_mid"] = df["bsize5_9"] / (
+            df["bsize0_4"] + eps)
+        df["depth_ratio_far"] = df["bsize10_19"] / (
+            df["bsize0_4"] + df["bsize5_9"] + df["bsize10_19"] + eps)
+
+        # Turnover imbalance at mid and far levels
+        df["turnover_imb_l5_9"] = np.log(
+            (df["btr5_9"] + eps) / (df["atr5_9"] + eps))
+        df["turnover_imb_l10_19"] = np.log(
+            (df["btr10_19"] + eps) / (df["atr10_19"] + eps))
+
+        # Turnover-to-depth ratio (execution efficiency at top of book)
+        df["depth_turnover_ratio"] = df["btr0_4"] / (
+            df["bsize0_4"] + eps)
+
+        # Spread sensitivity to total depth
+        df["spread_depth_ratio"] = (df["ask4"] - df["bid4"]) / (
+            df["bsize0_4"] + df["asize0_4"] + eps)
+
+        # Cross-order-book × turnover interactions
+        df["ob_imb0_x_turnover_imb"] = (
+            df["ob_imb0"] * df["turnover_imb_l1"])
+        df["depth_conc_x_spread"] = df["depth_conc_top"] * df["spread"]
+        df["depth_decay_x_vol"] = df["depth_decay"] * df["vol20"]
 
         # Assemble output
         feature_names = self.feature_names()

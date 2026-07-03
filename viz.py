@@ -13,7 +13,24 @@ def _check_matplotlib():
         try:
             import matplotlib
             matplotlib.use("Agg")  # non-interactive backend
-            import matplotlib.pyplot as plt
+            import matplotlib.font_manager as fm
+            import matplotlib.pyplot as plt  # noqa: F401
+
+            # Configure CJK font for Chinese text support
+            candidates = [
+                "Noto Sans CJK SC", "Noto Sans SC", "Noto Sans CJK TC",
+                "WenQuanYi Micro Hei", "WenQuanYi Zen Hei",
+                "SimHei", "Microsoft YaHei",
+                "AR PL UMing CN", "AR PL UKai CN",
+                "Source Han Sans SC", "Source Han Sans CN",
+            ]
+            available = {f.name for f in fm.fontManager.ttflist}
+            for font in candidates:
+                if font in available:
+                    matplotlib.rcParams["font.family"] = font
+                    matplotlib.rcParams["axes.unicode_minus"] = False
+                    break
+
             _mpl_available = True
         except ImportError:
             _mpl_available = False

@@ -126,6 +126,13 @@ class MeowEngine:
                 self.model.save_checkpoint(
                     os.path.join(self.checkpoint_dir, "checkpoint_latest.pt"))
 
+        # Restore best checkpoint so eval() uses optimal weights.
+        # (Loading after the loop ensures eval doesn't use overfit final-epoch weights.)
+        best_path = os.path.join(self.checkpoint_dir, "checkpoint_best.pt")
+        if self.checkpoint_dir and os.path.exists(best_path):
+            self.model.load_checkpoint(best_path)
+            log.inf("Restored best checkpoint for evaluation")
+
         log.inf("Done fitting. Best val Pearson r = {:.4f}".format(best_val_r))
 
     def _validate(self, val_dates):
